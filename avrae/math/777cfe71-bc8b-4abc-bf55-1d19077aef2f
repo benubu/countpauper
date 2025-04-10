@@ -7,85 +7,94 @@ except "FeatureNotAvailable":
 
 
 ### Parse
-sub_minus="−"
-ops={
-    ',':'tuple',
-    sub_minus:'sub',
-    '+':'sum',
-    '/':'div',
-    '*':'prod',
-    '^':'pow',
-    }
-
+sub_minus = "−"
+ops_levels = [
+    {',': 'tuple'},                        # Level 0: lowest precedence
+    {'+': 'sum', sub_minus: 'sub'},       # Level 1: addition/subtraction
+    {'*': 'prod', '/': 'div'},            # Level 2: multiplication/division
+    {'^': 'pow'},                         # Level 3: exponentiation
+]
 
 def parse_lhs_brackets(s):
-    "Find matching open close brackets and returns brackets_enclosed, remaining or False, Remaining."
-    pos=0
-    if s[pos]!='(':
+    pos = 0
+    if s[pos] != '(':
         return False, s 
     depth = 1
     while depth:
-        close=s.find(')',pos+1)
-        open=s.find('(',pos+1)
+        close = s.find(')', pos + 1)
+        open = s.find('(', pos + 1)
         if close < 0:
             err(f"Unmatched brace in {s}")
         elif open < 0 or open > close:
-            depth-=1
+            depth -= 1
             pos = close
-        else: # open < close:
+        else:
             pos = open
-            depth+=1
-    return s[1:pos],s[pos+1:]
+            depth += 1
+    return s[1:pos], s[pos + 1:]
 
 def parse_rhs_brackets(s):
     open = s.find('(')
     if open < 1:
         return s, False, ""
     else:
-        brace_str, remaining=parse_lhs_brackets(s[open:])
+        brace_str, remaining = parse_lhs_brackets(s[open:])
         return s[:open], f"({brace_str})", remaining
 
 def simplify(expression):
-    if typeof(expression)=='SafeDict':
-        if len(expression)==1 and (t := expression.get("tuple")):
+    if typeof(expression) == 'SafeDict':
+        if len(expression) == 1 and (t := expression.get("tuple")):
             return t
     if typeof(expression) == 'SafeList' or typeof(expression) == 'tuple':
-        if len(expression)==1:
+        if len(expression) == 1:
             return expression[0]
     return expression
 
 def parse_fn(s):
-    "Parse fn(params) to a dict(fn=params),remaining or False,remaining"
     fn, params, remaining = parse_rhs_brackets(s)
     if params is not False and fn.isidentifier():
         parsed_params = simplify(parse(params))
-        return {fn:parsed_params}, remaining
+        return {fn: parsed_params}, remaining
     else:
         return False, s
 
 def parse_op(s):
-    for op, fn in ops.items():
-        if op in s:
-            terms = s.split(op)
-            if any(not t for t in terms):
-                err(f"Missing term in {s}")
-            return {fn:[parse(term) for term in terms]}
+    for level in ops_levels:
+        for op in level:
+            if op not in s:
+                continue
+            terms = []
+            depth = 0
+            start = 0
+            for i, c in enumerate(s):
+                if c == '(':
+                    depth += 1
+                elif c == ')':
+                    depth -= 1
+                elif c == op and depth == 0:
+                    terms.append(s[start:i])
+                    start = i + 1
+            terms.append(s[start:])
+            if len(terms) > 1:
+                if any(not t for t in terms):
+                    err(f"Missing term in {s}")
+                return {level[op]: [parse(term) for term in terms]}
     return False
- 
+
 def parse_remaining(c, remaining):
     if not remaining:
         return c
-    for op, fn in ops.items():
-        if remaining[0]==op:
-            return {fn:[c,parse(remaining[1:])]}
-    # default to product
-    return dict(prod=parse(c))
+    for level in ops_levels:
+        op = remaining[0]
+        if op in level:
+            return {level[op]: [c, parse(remaining[1:])]}
+    return {'prod': [c, parse(remaining)]}
 
 def parse_preparsed_float(s):
-    s = s.replace("e","e-").replace("E","e+")
+    s = s.replace("e", "e-").replace("E", "e+")
     return float(s)
-    
-consts=dict(pi=math.pi,e=math.e,π=math.pi)
+
+consts = dict(pi=math.pi, e=math.e, π=math.pi)
 def parse_value(s):
     if s in consts:
         return consts[s]
@@ -94,19 +103,16 @@ def parse_value(s):
     else:
         return parse_preparsed_float(s)
 
-
-# To avoid confusion between negating and subtracting, all `-` are replaced with 
-# a similar looking unicode negative sign under the right conditions
 def prescan_negative(s):
-    result=""
-    before_neg=",-+/*^("
-    negative=True # if true next minus would be a negative
+    result = ""
+    before_neg = ",-+/*^("
+    negative = True
     for c in s:
-        if c=="-" and not negative:
-            result+= sub_minus
+        if c == "-" and not negative:
+            result += sub_minus
             negative = True
         else:
-            negative=c in before_neg
+            negative = c in before_neg
             result += c
     return result
 
@@ -115,36 +121,32 @@ def find_one_of(s, options, pos=0):
     best = len(s)
     best_idx = None
     for idx, f in enumerate(found):
-        if f>0 and f<best:
+        if f > 0 and f < best:
             best = f
             best_idx = idx
     return best, best_idx
- 
-# To avoid confusion between floating points with exponents, e.g 1.4e+3 
-# and +/- operators, all + or minus signs after an e or E are replaced
-# with just the e for e- and E for E+ 
-# Right before float conversion they will be converted back 
+
 def prescan_exponents(s):
-    result=s
-    before_exponent="0123456789."
+    result = s
+    before_exponent = "0123456789."
     pos = 0
-    while pos>=0:
-        next_pos, option = find_one_of(result, ("e+",'E+', 'e-','E-'), pos)
+    while pos >= 0:
+        next_pos, option = find_one_of(result, ("e+", 'E+', 'e-', 'E-'), pos)
         if option is None:
             return result
-        if result[next_pos-1] in before_exponent:
+        if result[next_pos - 1] in before_exponent:
             replacement = "Ee"[option // 2]
-            result = result[:next_pos] + replacement + result[next_pos+2:]
-        pos = next_pos+2
+            result = result[:next_pos] + replacement + result[next_pos + 2:]
+        pos = next_pos + 2
     return result
 
 def parse(s):
-    s=str(s).replace(" ","")
-    s=prescan_exponents(s)
-    s=prescan_negative(s)
+    s = str(s).replace(" ", "")
+    s = prescan_exponents(s)
+    s = prescan_negative(s)
 
-    if s[0]=='-':
-        return dict(neg=parse(s[1:]))
+    if s[0] == '-':
+        return {'neg': parse(s[1:])}
     braced_str, remaining = parse_lhs_brackets(s)
     if braced_str:
         return parse_remaining(parse(braced_str), remaining)
@@ -152,10 +154,11 @@ def parse(s):
     if fn:
         return parse_remaining(fn, remaining)
     premaining, braced_str, remaining = parse_rhs_brackets(s)
-    if braced_str and premaining[-1] in ops:
+    if braced_str and premaining[-1] in ''.join(k for level in ops_levels for k in level):
         return parse_remaining(
-                parse(premaining[:-1]), 
-                premaining[-1]+braced_str+remaining)
+            parse(premaining[:-1]), 
+            premaining[-1] + braced_str + remaining
+        )
 
     if op := parse_op(s):
         return op
@@ -172,7 +175,7 @@ def compute_args(arg):
     else:
         result = compute(arg)
         if typeof(result) != ListType:
-            result = [ result ]
+            result = [result]
     if any(typeof(a) not in numeric_types for a in result):
         err(f"nested tuple in {arg}")
     else:
@@ -180,71 +183,75 @@ def compute_args(arg):
 
 def compute_fn(fn, arg):
     cargs = compute_args(arg)
-    if fn=='sum':
+    if fn == 'sum':
         return sum(cargs)
-    elif fn=='sub':
+    elif fn == 'sub':
         return cargs[0] - sum(cargs[1:])
-    elif fn=='prod':
+    elif fn == 'prod':
         return math.prod(*cargs)
-    elif fn=='div':
-        return cargs[0]/sum(cargs[1:]) 
-    elif fn=='pow':
-         return math.pow(*cargs)
-    elif fn=='neg':
-        return -cargs[0] 
-    elif fn=='tuple':
+    elif fn == 'div':
+        return cargs[0] / sum(cargs[1:])
+    elif fn == 'pow':
+        return math.pow(*cargs)
+    elif fn == 'neg':
+        return -cargs[0]
+    elif fn == 'tuple':
         return cargs
-    elif fn=="sqrt":
+    elif fn == "sqrt":
         return math.squareroot(*cargs)
-    elif fn=="log":
+    elif fn == "log":
         return math.log(*cargs)
-    elif fn=='deg':
+    elif fn == 'deg':
         return math.degrees(*cargs)
-    elif fn=='rad':
+    elif fn == 'rad':
         return math.radians(*cargs)
-    elif fn=="sin":
+    elif fn == "sin":
         return math.sin(*cargs)
-    elif fn=="cos":
+    elif fn == "cos":
         return math.cos(*cargs)
-    elif fn=="tan":
+    elif fn == "tan":
         return math.tan(*cargs)
-    elif fn=="atan":
+    elif fn == "atan":
         return math.atan(*cargs)
-    elif fn=="atan2":
+    elif fn == "atan2":
         return math.atan2(*cargs)
-    elif fn=='asin':
+    elif fn == 'asin':
         return math.asin(cargs[0])
-    elif fn=='acos':
+    elif fn == 'acos':
         return math.acos(cargs[0])
-    elif fn=="factorial":
+    elif fn == "factorial":
         return math.factorial(*cargs)
-    elif fn=="comb":
+    elif fn == "comb":
         return math.comb(cargs[0], cargs[1])
-    elif fn=='perm':
+    elif fn == 'perm':
         return math.perm(cargs[0], cargs[1])
-    elif fn=='gcd':
+    elif fn == 'gcd':
         return math.gcd(*cargs)
-    elif fn=='lcm':
+    elif fn == 'lcm':
         return math.lcm(*cargs)
-    elif fn=='norm':
+    elif fn == 'norm':
         return math.hypot(*cargs)
     else:
         return f"Unknown function {fn}"
-        
+
 def compute(c):
-    if typeof(c)=='SafeDict':
+    if typeof(c) == 'SafeDict':
         result = [compute_fn(fn, a) for fn, a in c.items()]
         return simplify(result)
     else:
         return c
 
-### Present 
-reverse_ops = { v:k for k,v in ops.items() }
+
+### Present
+reverse_ops = {}
+for level in ops_levels:
+    for k, v in level.items():
+        reverse_ops[v] = k
 
 def present_sequence(fn, params):
     operator = reverse_ops[fn]
     return f"({f' {operator} '.join(params)})"
-    
+
 def present_fn(fn, arg):
     if typeof(arg) == ListType:
         pargs = [present_with_brackets(a) for a in arg]
@@ -252,25 +259,24 @@ def present_fn(fn, arg):
         pargs = [present_with_brackets(arg)]
     if fn in reverse_ops:
         return present_sequence(fn, pargs)
-    if fn=='neg':
+    if fn == 'neg':
         return f"-{strip_brackets(str(pargs[0]))}"
-    
     return f"{fn}( {', '.join(strip_brackets(str(a)) for a in pargs)} )"
 
 def strip_brackets(s):
-    while s and  s[0]=="(" and s[-1]==")":
+    while s and s[0] == "(" and s[-1] == ")":
         s = s[1:-1]
     return s
 
 def present_with_brackets(c):
-    if typeof(c)=='SafeDict':
-        result =  [present_fn(fn, cargs) for fn, cargs in c.items()]
-        return simplify(result);
+    if typeof(c) == 'SafeDict':
+        result = [present_fn(fn, cargs) for fn, cargs in c.items()]
+        return simplify(result)
     else:
         return str(c)
 
 def present(c):
     result = present_with_brackets(c)
-    if typeof(result)=='str':
+    if typeof(result) == 'str':
         result = strip_brackets(result)
     return result
